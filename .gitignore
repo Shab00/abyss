@@ -1,0 +1,29 @@
+# Python environments
+.venv/
+.venv-*/
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+
+# C build artifacts
+build/
+bin/
+*.o
+*.dylib
+*.so
+*.a
+
+# macOS
+.DS_Store
+
+# Recorded market data
+data/raw/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
