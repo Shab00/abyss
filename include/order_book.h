@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define ABYSS_BID 0
+#define ABYSS_ASK 1
+
 typedef int64_t price_t;
 typedef int64_t volume_t;
 typedef uint64_t order_id_t;
@@ -68,6 +71,7 @@ int ob_add_order(OrderBook *ob, order_id_t id, price_t price, volume_t qty, uint
 int ob_cancel_order(OrderBook *ob, order_id_t id);
 int ob_modify_order(OrderBook *ob, order_id_t id, volume_t new_qty);
 int ob_execute_trade(OrderBook *ob, price_t price, volume_t qty, uint64_t ts);
+int ob_get_depth(OrderBook *ob, int side, size_t n, price_t *price_out, volume_t *vol_out);
 int parse_binance_depth(OrderBook *ob, const char *json_str);
 int parse_binance_depth_file(OrderBook *ob, const char *filename);
 

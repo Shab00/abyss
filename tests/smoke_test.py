@@ -74,6 +74,26 @@ def test_context_manager():
         assert book.best_bid == 100.0
     print("  Context manager... PASS")
 
+def test_get_depth():
+    book = AbyssBook(max_price_levels=100, max_orders=1000)
+    book.add_order(1, 100.0, 5.0)
+    book.add_order(2, 99.5, 10.0)
+    book.add_order(3, 99.0, 3.0)
+    book.add_order(4, -101.0, 4.0)
+    book.add_order(5, -101.5, 6.0)
+    
+    bids = book.get_depth("bid", 3)
+    asks = book.get_depth("ask", 3)
+    
+    assert bids[0][0] == 100.0
+    assert bids[1][0] == 99.5
+    assert bids[2][0] == 99.0
+    assert asks[0][0] == 101.0
+    assert asks[1][0] == 101.5
+    
+    book.destroy()
+    print("  Get depth... PASS")
+
 if __name__ == "__main__":
     print("=== ABYSS Python Bindings Smoke Test ===\n")
     
@@ -84,6 +104,7 @@ if __name__ == "__main__":
         test_execute_trade,
         test_cancel_order,
         test_context_manager,
+        test_get_depth,
     ]
     
     passed = 0

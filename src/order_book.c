@@ -284,6 +284,22 @@ int ob_cancel_order(OrderBook *ob, order_id_t id) {
     return 0;
 }
 
+int ob_get_depth(OrderBook *ob, int side, size_t n,
+                 price_t *price_out, volume_t *vol_out) {
+    if (!ob || !price_out || !vol_out || n == 0) return -1;
+
+    PriceLevel *levels = (side == ABYSS_BID) ? ob->bids : ob->asks;
+    size_t count = (side == ABYSS_BID) ? ob->bid_count : ob->ask_count;
+    size_t to_copy = (n < count) ? n : count;
+
+    for (size_t i = 0; i < to_copy; i++) {
+        price_out[i] = levels[i].price;
+        vol_out[i] = levels[i].total_volume;
+    }
+
+    return (int)to_copy;
+}
+
 int ob_modify_order(OrderBook *ob, order_id_t id, volume_t new_qty) {
     OrderNode *node = order_map_lookup(ob->order_map, id);
     if (!node || new_qty < node->order.filled) return -1;

@@ -21,13 +21,14 @@ INT64 = ctypes.c_int64
 UINT64 = ctypes.c_uint64
 SIZE_T = ctypes.c_size_t
 
-# OrderBook handle (opaque pointer)
+ABYSS_BID = 0
+ABYSS_ASK = 1
+
 class OrderBook(ctypes.Structure):
     pass
 
 OrderBookPtr = ctypes.POINTER(OrderBook)
 
-# Snapshot struct matching metrics.h
 class Snapshot(ctypes.Structure):
     _fields_ = [
         ("midprice", INT64),
@@ -37,7 +38,6 @@ class Snapshot(ctypes.Structure):
         ("timestamp_ns", UINT64),
     ]
 
-# Function signatures
 _lib.ob_create.argtypes = [SIZE_T, SIZE_T]
 _lib.ob_create.restype = OrderBookPtr
 
@@ -68,7 +68,15 @@ _lib.ob_get_best_bid.restype = INT64
 _lib.ob_get_best_ask.argtypes = [OrderBookPtr]
 _lib.ob_get_best_ask.restype = INT64
 
-# Scaling constants
+_lib.ob_get_depth.argtypes = [
+    OrderBookPtr,
+    ctypes.c_int,
+    SIZE_T,
+    ctypes.POINTER(INT64),
+    ctypes.POINTER(INT64),
+]
+_lib.ob_get_depth.restype = ctypes.c_int
+
 PRICE_SCALE = 100_000_000.0  # Fixed-point scale: 1.0 = 100000000
 
 
@@ -113,6 +121,18 @@ class AbyssBook:
             "microprice": snap.microprice / PRICE_SCALE,
             "timestamp_ns": snap.timestamp_ns,
         }
+    
+    def get_depth(self, side="bid", levels=5):
+        """Return top N price levels as list of (price, volume) floats.
+        side: 'bid' or 'ask'. Best price first."""
+        side_id = ABYSS_BID if side == "bid" else ABYSS_ASK
+        price_arr = (INT64 * levels)()
+        vol_arr = (INT64 * levels)()
+        n = _lib.ob_get_depth(self._ptr, side_id, levels, price_arr, vol_arr)
+        return [
+            (price_arr[i] / PRICE_SCALE, vol_arr[i] / PRICE_SCALE)
+            for i in range(n)
+        ]
     
     @property
     def best_bid(self):
