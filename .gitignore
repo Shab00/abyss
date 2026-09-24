@@ -27,3 +27,6 @@ data/raw/
 .vscode/
 .idea/
 *.swp
+
+# Recorder log
+data/recorder.log
