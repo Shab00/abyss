@@ -6,7 +6,7 @@ from typing import Iterator, Dict, Any
 import pandas as pd
 
 from abyss.engine import AbyssBook
-from abyss.features import book, micro  # noqa: F401
+from abyss.features import book, micro, temporal  # noqa: F401
 from abyss.features.registry import all_features
 
 MAX_PRICE_LEVELS = 5000
@@ -60,8 +60,13 @@ def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
             }
             row = {name: spec.func(ctx) for name, spec in features.items()}
             row["recv_ts_ns"] = msg["recv_ts_ns"]
+            # Include computed metrics so temporal features have something to roll
+            for k, v in ctx["metrics"].items():
+                row[k] = v
             rows.append(row)
     finally:
         book.destroy()
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df = temporal.add_temporal_features(df)
+    return df
