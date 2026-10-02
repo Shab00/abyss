@@ -30,3 +30,6 @@ data/raw/
 
 # Recorder log
 data/recorder.log
+
+# Computed features
+data/features/
