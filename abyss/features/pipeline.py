@@ -70,3 +70,88 @@ def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df = temporal.add_temporal_features(df)
     return df
+
+def load_trades(path: Path, limit: int = None) -> pd.DataFrame:
+    """Load trades JSONL into a sorted DataFrame."""
+    rows = []
+    for i, msg in enumerate(_iter_jsonl(path)):
+        if limit is not None and i >= limit:
+            break
+        if msg.get("stream") != "btcusdt@trade":
+            continue
+        d = msg["data"]
+        rows.append({
+            "recv_ts_ns": msg["recv_ts_ns"],
+            "price": float(d["p"]),
+            "qty": float(d["q"]),
+            "is_buyer_maker": bool(d["m"]),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["recv_ts_ns", "price", "qty", "is_buyer_maker"])
+    return pd.DataFrame(rows).sort_values("recv_ts_ns").reset_index(drop=True)
+
+
+def aggregate_trades_for_snapshots(
+    trades: pd.DataFrame, depth_df: pd.DataFrame
+) -> pd.DataFrame:
+    """For each depth snapshot at time T, aggregate trades that occurred
+    in the interval (previous_T, T] — i.e., the trades that led up to the
+    snapshot's current state.
+
+    Every trade is assigned to the *next* depth snapshot at or after its
+    receive time. Then trades are grouped by that snapshot."""
+    empty_cols = ["recv_ts_ns", "trade_count", "trade_volume",
+                  "buy_volume", "sell_volume", "vwap", "trade_imbalance"]
+    if len(trades) == 0 or len(depth_df) == 0:
+        return pd.DataFrame(columns=empty_cols)
+
+    snaps = pd.DataFrame({"snapshot_ts": sorted(depth_df["recv_ts_ns"].unique())})
+    trades_sorted = trades.sort_values("recv_ts_ns").reset_index(drop=True)
+
+    aligned = pd.merge_asof(
+        trades_sorted,
+        snaps,
+        left_on="recv_ts_ns",
+        right_on="snapshot_ts",
+        direction="forward",
+    )
+    # Trades before the first snapshot or after the last get no match — drop
+    aligned = aligned.dropna(subset=["snapshot_ts"]).copy()
+
+    # Vectorised buy/sell volume split using isBuyerMaker
+    # m=True  -> seller was aggressor -> sell-side trade
+    # m=False -> buyer  was aggressor -> buy-side  trade
+    aligned["buy_volume"] = aligned["qty"].where(~aligned["is_buyer_maker"], 0.0)
+    aligned["sell_volume"] = aligned["qty"].where(aligned["is_buyer_maker"], 0.0)
+    aligned["notional"] = aligned["price"] * aligned["qty"]
+
+    grouped = aligned.groupby("snapshot_ts").agg(
+        trade_count=("qty", "size"),
+        trade_volume=("qty", "sum"),
+        buy_volume=("buy_volume", "sum"),
+        sell_volume=("sell_volume", "sum"),
+        notional=("notional", "sum"),
+    ).reset_index()
+
+    grouped["vwap"] = grouped["notional"] / grouped["trade_volume"]
+    grouped["trade_imbalance"] = grouped["buy_volume"] - grouped["sell_volume"]
+
+    grouped = grouped.rename(columns={"snapshot_ts": "recv_ts_ns"})
+    return grouped[empty_cols]
+
+
+def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
+    """Merge aggregated trade features into the depth feature DataFrame."""
+    agg = aggregate_trades_for_snapshots(trades, depth_df)
+    if len(agg) == 0:
+        return depth_df
+
+    merged = depth_df.merge(agg, on="recv_ts_ns", how="left")
+
+    # Snapshots with no trades: fill counts/volumes with 0
+    for col in ["trade_count", "trade_volume", "buy_volume", "sell_volume",
+                "trade_imbalance"]:
+        merged[col] = merged[col].fillna(0)
+
+    # vwap stays NaN where there were no trades — meaningful absence
+    return merged
