@@ -13,6 +13,10 @@ MAX_PRICE_LEVELS = 5000
 MAX_ORDERS = 100_000
 DEPTH_LEVELS = 5
 
+# VPIN parameters
+VPIN_BUCKET_SIZE = 1.0     # BTC per volume bucket
+VPIN_N_BUCKETS = 50        # rolling window of buckets
+
 
 def _iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
     with open(path) as f:
@@ -60,7 +64,6 @@ def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
             }
             row = {name: spec.func(ctx) for name, spec in features.items()}
             row["recv_ts_ns"] = msg["recv_ts_ns"]
-            # Include computed metrics so temporal features have something to roll
             for k, v in ctx["metrics"].items():
                 row[k] = v
             rows.append(row)
@@ -95,15 +98,10 @@ def load_trades(path: Path, limit: int = None) -> pd.DataFrame:
 def aggregate_trades_for_snapshots(
     trades: pd.DataFrame, depth_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """For each depth snapshot at time T, aggregate trades that occurred
-    in the interval (previous_T, T] — i.e., the trades that led up to the
-    snapshot's current state.
-
-    Every trade is assigned to the *next* depth snapshot at or after its
-    receive time. Then trades are grouped by that snapshot."""
+    """Aggregate trades per depth snapshot interval, including effective spread."""
     empty_cols = ["recv_ts_ns", "trade_count", "trade_volume",
                   "buy_volume", "sell_volume", "vwap", "trade_imbalance",
-                  "effective_spread_mean"]
+                  "effective_spread_mean", "notional"]
     if len(trades) == 0 or len(depth_df) == 0:
         return pd.DataFrame(columns=empty_cols)
 
@@ -117,10 +115,8 @@ def aggregate_trades_for_snapshots(
         right_on="snapshot_ts",
         direction="forward",
     )
-    # Trades before the first snapshot or after the last get no match — drop
     aligned = aligned.dropna(subset=["snapshot_ts"]).copy()
 
-    # Attach midprice known at trade time (prior snapshot, no look-ahead)
     prior_mid = pd.merge_asof(
         aligned[["recv_ts_ns"]].sort_values("recv_ts_ns"),
         depth_df[["recv_ts_ns", "midprice"]].sort_values("recv_ts_ns"),
@@ -131,9 +127,6 @@ def aggregate_trades_for_snapshots(
     prior_mid = prior_mid.reset_index(drop=True)
     aligned["midprice_at_trade"] = prior_mid["midprice"].values
 
-    # Per-trade effective spread
-    # m=True  -> seller aggressor -> sell-side -> sign = -1
-    # m=False -> buyer  aggressor -> buy-side  -> sign = +1
     side_sign = (~aligned["is_buyer_maker"]).astype(int) * 2 - 1
     aligned["effective_spread"] = (
         2.0 * side_sign * (aligned["price"] - aligned["midprice_at_trade"])
@@ -158,6 +151,101 @@ def aggregate_trades_for_snapshots(
     return grouped[empty_cols]
 
 
+def add_amihud_features(df: pd.DataFrame, windows=(20, 100, 500)) -> pd.DataFrame:
+    """Amihud illiquidity: rolling sum of |return| / rolling sum of dollar volume.
+
+    Windows are in snapshots (100ms each). 20 = 2s, 100 = 10s, 500 = 50s.
+
+    NOTE: At 100ms frequency, midprice returns are mostly zero, so the
+    resulting Amihud values are near-zero and not informative. The
+    implementation is correct — Amihud is designed for daily bars, not
+    tick data. Deferred to Phase 4, where this should be applied to
+    resampled (1-minute or 5-minute) bars instead of raw snapshots.
+    """
+    if len(df) == 0:
+        return df
+    if "return_1" not in df.columns or "notional" not in df.columns:
+        return df
+
+    abs_ret = df["return_1"].abs()
+    vol = df["notional"]  # keep zeros — don't mask
+
+    for w in windows:
+        ret_sum = abs_ret.rolling(w).sum()
+        vol_sum = vol.rolling(w).sum()
+        # Only mask where the window had zero total volume (truly no info)
+        df[f"amihud_{w}"] = ret_sum / vol_sum.where(vol_sum > 0)
+    return df
+
+
+def compute_vpin(
+    trades: pd.DataFrame,
+    bucket_size: float = VPIN_BUCKET_SIZE,
+    n_buckets: int = VPIN_N_BUCKETS,
+) -> pd.DataFrame:
+    """Volume-bucketed VPIN.
+
+    Splits the trade stream into equal-volume buckets (~bucket_size BTC
+    each), computes per-bucket order imbalance
+        |V_buy - V_sell| / bucket_total_volume,
+    then rolls a mean over the last n_buckets.
+
+    Normalising by actual bucket volume (not nominal bucket_size) keeps
+    the result strictly in [0, 1], even when trades straddle a boundary.
+
+    Returns DataFrame ['recv_ts_ns', 'vpin'] where recv_ts_ns is the close
+    time (last trade receive timestamp) of each bucket."""
+    if len(trades) == 0:
+        return pd.DataFrame(columns=["recv_ts_ns", "vpin"])
+
+    t = trades.sort_values("recv_ts_ns").reset_index(drop=True).copy()
+
+    t["cum_vol"] = t["qty"].cumsum()
+    t["bucket"] = (t["cum_vol"] // bucket_size).astype("int64")
+
+    t["buy_vol"] = t["qty"].where(~t["is_buyer_maker"], 0.0)
+    t["sell_vol"] = t["qty"].where(t["is_buyer_maker"], 0.0)
+
+    buckets = t.groupby("bucket").agg(
+        buy_vol=("buy_vol", "sum"),
+        sell_vol=("sell_vol", "sum"),
+        close_ts=("recv_ts_ns", "max"),
+    ).reset_index()
+
+    buckets["total_vol"] = buckets["buy_vol"] + buckets["sell_vol"]
+    buckets["imbalance"] = (
+        (buckets["buy_vol"] - buckets["sell_vol"]).abs() / buckets["total_vol"]
+    )
+    buckets["vpin"] = buckets["imbalance"].rolling(n_buckets).mean()
+
+    return buckets[["close_ts", "vpin"]].rename(columns={"close_ts": "recv_ts_ns"})
+
+
+def add_vpin_feature(
+    depth_df: pd.DataFrame,
+    trades: pd.DataFrame,
+    bucket_size: float = VPIN_BUCKET_SIZE,
+    n_buckets: int = VPIN_N_BUCKETS,
+) -> pd.DataFrame:
+    """Attach VPIN to each depth snapshot from the most recent completed
+    volume bucket before the snapshot time."""
+    vpin_series = compute_vpin(trades, bucket_size=bucket_size, n_buckets=n_buckets)
+    if len(vpin_series) == 0:
+        depth_df["vpin"] = float("nan")
+        return depth_df
+
+    depth_sorted = depth_df.sort_values("recv_ts_ns").reset_index(drop=True)
+    vpin_sorted = vpin_series.sort_values("recv_ts_ns").reset_index(drop=True)
+
+    merged = pd.merge_asof(
+        depth_sorted,
+        vpin_sorted,
+        on="recv_ts_ns",
+        direction="backward",
+    )
+    return merged
+
+
 def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     """Merge aggregated trade features into the depth feature DataFrame."""
     agg = aggregate_trades_for_snapshots(trades, depth_df)
@@ -166,10 +254,11 @@ def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataF
 
     merged = depth_df.merge(agg, on="recv_ts_ns", how="left")
 
-    # Snapshots with no trades: fill counts/volumes with 0
     for col in ["trade_count", "trade_volume", "buy_volume", "sell_volume",
-                "trade_imbalance"]:
+                "trade_imbalance", "notional"]:
         merged[col] = merged[col].fillna(0)
 
-    # vwap and effective_spread_mean stay NaN where there were no trades
+    merged = add_amihud_features(merged)
+    merged = add_vpin_feature(merged, trades)
+
     return merged
