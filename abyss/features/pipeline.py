@@ -71,6 +71,7 @@ def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
     df = temporal.add_temporal_features(df)
     return df
 
+
 def load_trades(path: Path, limit: int = None) -> pd.DataFrame:
     """Load trades JSONL into a sorted DataFrame."""
     rows = []
@@ -101,7 +102,8 @@ def aggregate_trades_for_snapshots(
     Every trade is assigned to the *next* depth snapshot at or after its
     receive time. Then trades are grouped by that snapshot."""
     empty_cols = ["recv_ts_ns", "trade_count", "trade_volume",
-                  "buy_volume", "sell_volume", "vwap", "trade_imbalance"]
+                  "buy_volume", "sell_volume", "vwap", "trade_imbalance",
+                  "effective_spread_mean"]
     if len(trades) == 0 or len(depth_df) == 0:
         return pd.DataFrame(columns=empty_cols)
 
@@ -118,9 +120,24 @@ def aggregate_trades_for_snapshots(
     # Trades before the first snapshot or after the last get no match — drop
     aligned = aligned.dropna(subset=["snapshot_ts"]).copy()
 
-    # Vectorised buy/sell volume split using isBuyerMaker
-    # m=True  -> seller was aggressor -> sell-side trade
-    # m=False -> buyer  was aggressor -> buy-side  trade
+    # Attach midprice known at trade time (prior snapshot, no look-ahead)
+    prior_mid = pd.merge_asof(
+        aligned[["recv_ts_ns"]].sort_values("recv_ts_ns"),
+        depth_df[["recv_ts_ns", "midprice"]].sort_values("recv_ts_ns"),
+        on="recv_ts_ns",
+        direction="backward",
+    )
+    aligned = aligned.sort_values("recv_ts_ns").reset_index(drop=True)
+    prior_mid = prior_mid.reset_index(drop=True)
+    aligned["midprice_at_trade"] = prior_mid["midprice"].values
+
+    # Per-trade effective spread
+    # m=True  -> seller aggressor -> sell-side -> sign = -1
+    # m=False -> buyer  aggressor -> buy-side  -> sign = +1
+    side_sign = (~aligned["is_buyer_maker"]).astype(int) * 2 - 1
+    aligned["effective_spread"] = (
+        2.0 * side_sign * (aligned["price"] - aligned["midprice_at_trade"])
+    )
     aligned["buy_volume"] = aligned["qty"].where(~aligned["is_buyer_maker"], 0.0)
     aligned["sell_volume"] = aligned["qty"].where(aligned["is_buyer_maker"], 0.0)
     aligned["notional"] = aligned["price"] * aligned["qty"]
@@ -131,6 +148,7 @@ def aggregate_trades_for_snapshots(
         buy_volume=("buy_volume", "sum"),
         sell_volume=("sell_volume", "sum"),
         notional=("notional", "sum"),
+        effective_spread_mean=("effective_spread", "mean"),
     ).reset_index()
 
     grouped["vwap"] = grouped["notional"] / grouped["trade_volume"]
@@ -153,5 +171,5 @@ def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataF
                 "trade_imbalance"]:
         merged[col] = merged[col].fillna(0)
 
-    # vwap stays NaN where there were no trades — meaningful absence
+    # vwap and effective_spread_mean stay NaN where there were no trades
     return merged
