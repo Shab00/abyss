@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from abyss.features import temporal
 from abyss.features.pipeline import (
     process_depth_file,
     load_trades,
@@ -34,6 +35,11 @@ def main():
 
         df = add_trade_features(df, trades)
         print(f"  After merge: {df.shape[0]:,} rows  {df.shape[1]} columns")
+
+    # Temporal features run LAST so they can roll over depth + trade columns
+    df = temporal.add_temporal_features(df)
+    df = temporal.add_long_horizon_features(df)
+    print(f"  After temporal: {df.shape[0]:,} rows  {df.shape[1]} columns")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(args.out, index=False)

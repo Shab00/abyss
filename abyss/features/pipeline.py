@@ -71,7 +71,6 @@ def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
         book.destroy()
 
     df = pd.DataFrame(rows)
-    df = temporal.add_temporal_features(df)
     return df
 
 
@@ -164,8 +163,12 @@ def add_amihud_features(df: pd.DataFrame, windows=(20, 100, 500)) -> pd.DataFram
     """
     if len(df) == 0:
         return df
-    if "return_1" not in df.columns or "notional" not in df.columns:
+    if "midprice" not in df.columns or "notional" not in df.columns:
         return df
+
+    # Compute return_1 if not already present (temporal now runs later)
+    if "return_1" not in df.columns:
+        df["return_1"] = df["midprice"].pct_change()
 
     abs_ret = df["return_1"].abs()
     vol = df["notional"]  # keep zeros — don't mask
@@ -246,6 +249,38 @@ def add_vpin_feature(
     return merged
 
 
+def add_cancel_intensity(df: pd.DataFrame, windows=(5, 20, 60)) -> pd.DataFrame:
+    """Approximate cancel intensity from depth churn not explained by trades.
+
+    Logic:
+      - depth change between snapshots = adds - cancels - trades
+      - adds and cancels can't be separated from depth data alone
+      - so we measure "churn": total absolute depth change minus trade volume
+      - positive churn is activity beyond trades — mostly cancels + adds
+
+    Documented as an approximation. Public Binance data doesn't expose
+    individual cancels, so this is the best available proxy.
+    """
+    bid_cols = [c for c in df.columns if c.startswith("depth_l") and "_bid_vol" in c]
+    ask_cols = [c for c in df.columns if c.startswith("depth_l") and "_ask_vol" in c]
+    if not bid_cols or not ask_cols:
+        return df
+
+    total_bid = df[bid_cols].sum(axis=1)
+    total_ask = df[ask_cols].sum(axis=1)
+    delta = total_bid.diff().abs() + total_ask.diff().abs()
+
+    trades_vol = df["trade_volume"] if "trade_volume" in df.columns else 0.0
+    churn = (delta - trades_vol).clip(lower=0.0)
+
+    avg_depth = (total_bid + total_ask) / 2.0
+    df["cancel_intensity"] = (churn / avg_depth.where(avg_depth > 0)).fillna(0.0)
+
+    for w in windows:
+        df[f"cancel_intensity_{w}"] = df["cancel_intensity"].rolling(w).mean()
+    return df
+
+
 def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     """Merge aggregated trade features into the depth feature DataFrame."""
     agg = aggregate_trades_for_snapshots(trades, depth_df)
@@ -260,5 +295,6 @@ def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataF
 
     merged = add_amihud_features(merged)
     merged = add_vpin_feature(merged, trades)
+    merged = add_cancel_intensity(merged)
 
     return merged
