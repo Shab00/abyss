@@ -37,6 +37,7 @@ def main():
         print(f"  After merge: {df.shape[0]:,} rows  {df.shape[1]} columns")
 
     # Temporal features run LAST so they can roll over depth + trade columns
+    df = temporal.add_queue_position(df)
     df = temporal.add_temporal_features(df)
     df = temporal.add_long_horizon_features(df)
     print(f"  After temporal: {df.shape[0]:,} rows  {df.shape[1]} columns")

@@ -78,3 +78,38 @@ def add_long_horizon_features(df: pd.DataFrame, windows=None) -> pd.DataFrame:
             df[f"trade_count_long_{w}"] = df["trade_count"].rolling(w).sum()
 
     return df
+
+def add_queue_position(df: pd.DataFrame) -> pd.DataFrame:
+    """Estimate queue position from proportional-depletion approximation.
+
+    Public Binance data gives aggregated size per price level, not per-order
+    queue positions. This is an approximation:
+      - track the best bid and best ask price levels over time
+      - segment the stream wherever the best price changes (new queue)
+      - within each segment, queue_position = current_volume / running_max_vol
+      - 1.0 = fresh level (back of queue), closer to 0 = depleted (near front)
+
+    Documented as an approximation. Not a precise measurement.
+    """
+    if len(df) == 0 or "depth_l1_bid_price" not in df.columns:
+        return df
+
+    for side in ["bid", "ask"]:
+        price = df[f"depth_l1_{side}_price"]
+        vol = df[f"depth_l1_{side}_vol"]
+
+        # Segment ID increments every time the price level changes
+        segment = (price != price.shift(1)).cumsum()
+
+        # Running max within each segment
+        running_max = vol.groupby(segment).cummax()
+
+        # Queue position: 1.0 fresh, lower = depleted
+        df[f"queue_position_{side}"] = (vol / running_max).fillna(1.0)
+
+        # Rolling mean for a smoother signal
+        df[f"queue_position_{side}_mean_60"] = (
+            df[f"queue_position_{side}"].rolling(60).mean()
+        )
+
+    return df
