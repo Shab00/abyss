@@ -1,0 +1,18 @@
+# ABYSS feature selection config
+# Groups map to logical feature families. Set to false to skip a group.
+# Individual features can be force-enabled via `include` or force-disabled
+# via `exclude`, regardless of their group's setting.
+
+groups:
+  depth: true             # L1-L5 price and volume features
+  microstructure: true    # midprice, spread, imbalance, microprice
+  temporal_short: true    # 0.5s / 2s / 6s rolling features
+  temporal_long: true     # 1m / 5m / 15m rolling features
+  trade_flow: true        # trade_count, vwap, trade_imbalance
+  spread_toxicity: true   # effective_spread_mean, vpin
+  amihud: false           # deferred to Phase 4 (tick-frequency Amihud is near-zero)
+  cancel_intensity: true  # depth churn minus trades
+  queue_position: true    # proportional-depletion estimate
+
+include: []
+exclude: []

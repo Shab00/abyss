@@ -7,7 +7,8 @@ import pandas as pd
 
 from abyss.engine import AbyssBook
 from abyss.features import book, micro, temporal  # noqa: F401
-from abyss.features.registry import all_features
+from abyss.features.registry import all_features, get_registry_features
+from abyss.config import feature_enabled
 
 MAX_PRICE_LEVELS = 5000
 MAX_ORDERS = 100_000
@@ -32,9 +33,9 @@ def _parse_depth_message(data: Dict[str, Any]):
     return bids, asks
 
 
-def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
+def process_depth_file(path: Path, limit: int = None, config: dict = None) -> pd.DataFrame:
     book = AbyssBook(max_price_levels=MAX_PRICE_LEVELS, max_orders=MAX_ORDERS)
-    features = all_features()
+    features = get_registry_features(config)
     rows = []
     try:
         for i, msg in enumerate(_iter_jsonl(path)):
@@ -70,8 +71,7 @@ def process_depth_file(path: Path, limit: int = None) -> pd.DataFrame:
     finally:
         book.destroy()
 
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 
 def load_trades(path: Path, limit: int = None) -> pd.DataFrame:
@@ -281,20 +281,26 @@ def add_cancel_intensity(df: pd.DataFrame, windows=(5, 20, 60)) -> pd.DataFrame:
     return df
 
 
-def add_trade_features(depth_df: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
+def add_trade_features(
+    depth_df: pd.DataFrame, trades: pd.DataFrame, config: dict = None
+) -> pd.DataFrame:
     """Merge aggregated trade features into the depth feature DataFrame."""
-    agg = aggregate_trades_for_snapshots(trades, depth_df)
-    if len(agg) == 0:
-        return depth_df
+    merged = depth_df.copy()
 
-    merged = depth_df.merge(agg, on="recv_ts_ns", how="left")
+    # Aggregation is needed for both trade_flow and spread_toxicity
+    if feature_enabled(config, "trade_flow") or feature_enabled(config, "spread_toxicity"):
+        agg = aggregate_trades_for_snapshots(trades, depth_df)
+        if len(agg) > 0:
+            merged = merged.merge(agg, on="recv_ts_ns", how="left")
+            for col in ["trade_count", "trade_volume", "buy_volume",
+                        "sell_volume", "trade_imbalance", "notional"]:
+                merged[col] = merged[col].fillna(0)
 
-    for col in ["trade_count", "trade_volume", "buy_volume", "sell_volume",
-                "trade_imbalance", "notional"]:
-        merged[col] = merged[col].fillna(0)
-
-    merged = add_amihud_features(merged)
-    merged = add_vpin_feature(merged, trades)
-    merged = add_cancel_intensity(merged)
+    if feature_enabled(config, "amihud", default=False):
+        merged = add_amihud_features(merged)
+    if feature_enabled(config, "spread_toxicity"):
+        merged = add_vpin_feature(merged, trades)
+    if feature_enabled(config, "cancel_intensity"):
+        merged = add_cancel_intensity(merged)
 
     return merged
