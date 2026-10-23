@@ -394,3 +394,31 @@ groups:
   queue_position: true
 include: []
 exclude: []
+
+---
+
+## Appendix: Features deliberately not implemented
+
+### `realized_spread`
+
+**Not a feature — reserved as a Phase 4 label.**
+
+- **Formula:** `2 × side_sign × (prior_midprice_N_seconds_later − trade_price)`
+- **Why not a feature:** uses the **future** midprice. Including it in the
+  feature set would leak future information into training and inflate
+  model performance in a way that doesn't hold in live inference.
+- **Where it will be used:** Phase 4 dataset assembly — as a prediction
+  target (`y`), not an input (`X`).
+- **Reference:** standard realised-spread decomposition (Huang & Stoll,
+  1996) adapted for trade-level data.
+
+If you find yourself wanting to add `realized_spread` as a column here:
+**don't.** Compute it in a separate label-generation step with explicit
+future-looking semantics, and keep it out of the feature DataFrame.
+
+### `trade_price` (raw)
+
+- Raw trade price is not stored per snapshot.
+- `vwap` captures the volume-weighted average within each snapshot interval.
+- If individual trade prices are needed, they are available in
+  `data/raw/*/trades_*.jsonl` — no need to duplicate in the feature Parquet.
