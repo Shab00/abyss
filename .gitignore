@@ -33,3 +33,6 @@ data/recorder.log
 
 # Computed features
 data/features/
+
+# Partitioned feature dataset (regenerable)
+data/features/dataset/
