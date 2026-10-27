@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Extract features from a day's recorded depth and (optionally) trades JSONL."""
+
 import argparse
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -13,6 +15,13 @@ from abyss.features.pipeline import (
     load_trades,
     add_trade_features,
 )
+
+from abyss.quality.checks import (
+    check_day_quality,
+    quality_to_dict,
+    print_quality_report,
+)
+
 from abyss.features.metadata import write_parquet_with_metadata
 from abyss.features.registry import get_registry_features
 
@@ -50,7 +59,16 @@ def main():
     if feature_enabled(config, "temporal_long"):
         df = temporal.add_long_horizon_features(df)
     print(f"  After temporal: {df.shape[0]:,} rows  {df.shape[1]} columns")
+    # --- Data quality ---
+    trades_path = args.trades if args.trades else None
+    quality = check_day_quality(args.depth_jsonl, trades_path)
+    print_quality_report(quality)
 
+    quality_out = args.out.with_suffix(".quality.json")
+    quality_out.parent.mkdir(parents=True, exist_ok=True)
+    quality_out.write_text(json.dumps(quality_to_dict(quality), indent=2))
+
+    print(f"Wrote: {quality_out}")
     feature_specs = get_registry_features(config)
     write_parquet_with_metadata(
         df, args.out,
