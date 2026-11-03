@@ -1,0 +1,43 @@
+# ABYSS strategy configuration
+# Each entry defines a strategy instance: name, class, and parameters.
+
+defaults:
+  max_position: 5.0            # absolute BTC
+  max_order_size: 0.1          # BTC per order
+  max_daily_loss: 1000.0       # USD, halt trading
+  latency_ms: 10               # assumed latency from order submit to live
+
+strategies:
+  market_maker:
+    class: market_maker
+    params:
+      half_spread_bps: 2.0
+      inventory_skew: 0.5
+      quote_size: 0.01
+      requote_threshold_bps: 0.5
+      max_position: 5.0
+
+  mean_reversion:
+    class: mean_reversion
+    params:
+      window: 300                # snapshots
+      entry_sigma: 2.0
+      exit_sigma: 0.5
+      position_size: 0.01
+      max_position: 5.0
+
+  momentum:
+    class: momentum
+    params:
+      lookback: 60
+      threshold_bps: 5.0
+      position_size: 0.01
+
+  twap:
+    class: twap
+    params:
+      target_size: 0.5
+      duration_minutes: 30
+
+# Cash reserve per strategy (for leverage checks)
+capital_per_strategy_usd: 10000.0
