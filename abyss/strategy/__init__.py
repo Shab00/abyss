@@ -24,7 +24,10 @@ from abyss.strategy.engine import (
     EngineResult,
     RiskLimits,
     WorkingOrder,
-)  # noqa: F401
+)
+
+# Import built-in strategies so they register on package import
+from abyss.strategy import strategies  # noqa: F401
 
 __all__ = [
     "Strategy",
