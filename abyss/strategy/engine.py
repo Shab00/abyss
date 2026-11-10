@@ -118,6 +118,7 @@ class Engine:
 
         self._trading_halted = False
         self._halt_until_ts_ns = 0
+        self._strategy_error_logged = False
 
     def run(
         self,
@@ -129,7 +130,6 @@ class Engine:
         if not events:
             return self._build_result()
 
-        # Initialize snapshot from first depth event
         for e in events:
             if e["type"] == "depth":
                 self._current_snapshot = e["snapshot"]
@@ -178,22 +178,28 @@ class Engine:
         limit: Optional[int],
     ) -> list[dict]:
         events = []
-        for _, row in depth_df.iterrows():
+
+        # itertuples() is ~5-10x faster than iterrows() on large frames
+        depth_cols = list(depth_df.columns)
+        for row in depth_df.itertuples(index=False):
+            snapshot = dict(zip(depth_cols, row))
             events.append({
                 "type": "depth",
-                "ts": int(row["recv_ts_ns"]),
-                "snapshot": row.to_dict(),
+                "ts": int(snapshot["recv_ts_ns"]),
+                "snapshot": snapshot,
             })
-        for _, row in trades_df.iterrows():
+
+        for row in trades_df.itertuples(index=False):
             events.append({
                 "type": "trade",
-                "ts": int(row["recv_ts_ns"]),
+                "ts": int(row.recv_ts_ns),
                 "trade": {
-                    "price": float(row["price"]),
-                    "qty": float(row["qty"]),
-                    "is_buyer_maker": bool(row["is_buyer_maker"]),
+                    "price": float(row.price),
+                    "qty": float(row.qty),
+                    "is_buyer_maker": bool(row.is_buyer_maker),
                 },
             })
+
         events.sort(key=lambda e: e["ts"])
         if limit:
             events = events[:limit]
@@ -244,7 +250,11 @@ class Engine:
         try:
             new_orders = self.strategy.generate_orders(ctx)
         except Exception as e:
-            print(f"[engine] strategy.generate_orders raised: {e}")
+            # Log the first occurrence only; suppressing repeats keeps
+            # dev logs readable when a strategy has a persistent bug
+            if not self._strategy_error_logged:
+                print(f"[engine] strategy.generate_orders raised: {e}")
+                self._strategy_error_logged = True
             return
         for order in new_orders:
             self._place_order(ts, order)
@@ -359,7 +369,6 @@ class Engine:
 
         new_position = self.position + signed_qty
 
-        # Realized P&L on position reduction
         if self.position != 0 and (self.position > 0) != (signed_qty > 0):
             closing_qty = min(abs(signed_qty), abs(self.position))
             if self.position > 0:
@@ -368,7 +377,6 @@ class Engine:
                 realized = (self.avg_entry_price - fill.price) * closing_qty
             self.realized_pnl += realized
 
-        # Update avg entry price
         if new_position == 0:
             self.avg_entry_price = 0.0
         elif self.position == 0 or (self.position > 0) == (signed_qty > 0):

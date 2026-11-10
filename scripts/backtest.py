@@ -5,8 +5,10 @@ Usage:
     python3 scripts/backtest.py --strategy market_maker --dates 20260924
     python3 scripts/backtest.py --strategy market_maker --dates 20260919-20260924
     python3 scripts/backtest.py --compare --strategies market_maker mean_reversion --dates 20260924
+    python3 scripts/backtest.py --list-strategies
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -42,7 +44,9 @@ def main():
     p.add_argument("--strategy", type=str, default=None)
     p.add_argument("--strategies", type=str, nargs="+", default=None)
     p.add_argument("--compare", action="store_true")
-    p.add_argument("--dates", type=str, required=True)
+    p.add_argument("--dates", type=str, default=None,
+                   help="YYYYMMDD or YYYYMMDD-YYYYMMDD (required unless "
+                        "--list-strategies)")
     p.add_argument("--params", type=str, default="{}",
                    help="JSON dict of strategy params")
     p.add_argument("--max-position", type=float, default=5.0)
@@ -59,6 +63,11 @@ def main():
             print(f"  - {name}")
         return 0
 
+    if not args.dates:
+        print("--dates is required (unless using --list-strategies)",
+              file=sys.stderr)
+        return 1
+
     dates = parse_dates(args.dates)
     print(f"Dates: {dates}")
 
@@ -69,7 +78,6 @@ def main():
         aggressive_slippage_bps=args.slippage_bps,
     )
 
-    import json
     try:
         params = json.loads(args.params)
     except json.JSONDecodeError as e:
@@ -83,7 +91,8 @@ def main():
         strategies = args.strategies
     else:
         if not args.strategy:
-            print("Provide --strategy or use --compare --strategies", file=sys.stderr)
+            print("Provide --strategy or use --compare --strategies",
+                  file=sys.stderr)
             return 1
         strategies = [args.strategy]
 
@@ -107,7 +116,6 @@ def main():
         print(df.to_string(index=False))
         print()
 
-    # Save artifacts
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for r in results:
         if len(r.fills) > 0:
@@ -116,7 +124,9 @@ def main():
             r.equity.to_parquet(args.out_dir / f"equity_{r.strategy_name}.parquet")
 
     if len(results) > 1:
-        compare_results(results).to_csv(args.out_dir / "comparison.csv", index=False)
+        compare_results(results).to_csv(
+            args.out_dir / "comparison.csv", index=False
+        )
 
     print(f"Wrote results to {args.out_dir}")
     return 0

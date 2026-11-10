@@ -62,8 +62,6 @@ def test_parse_dates_range():
 
 def test_backtest_result_defaults():
     """BacktestResult can be constructed with minimal args (smoke test)."""
-    # We can't easily run a full backtest without data, so verify
-    # the dataclass shape works
     from abyss.strategy.backtest import BacktestResult
     from abyss.risk.metrics import RiskMetrics
 
@@ -89,7 +87,7 @@ def test_backtest_result_defaults():
 
 
 def test_compare_results_shape():
-    """compare_results handles multiple results."""
+    """compare_results handles multiple results with gross/net columns."""
     from abyss.risk.metrics import RiskMetrics
 
     def empty_metrics():
@@ -115,7 +113,8 @@ def test_compare_results_shape():
     df = compare_results([r1, r2])
     assert len(df) == 2
     assert "strategy" in df.columns
-    assert "pnl_usd" in df.columns
+    assert "gross_usd" in df.columns
+    assert "net_usd" in df.columns
 
 
 def test_summarize_result():

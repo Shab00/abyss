@@ -22,31 +22,22 @@ from abyss.strategy.registry import get_strategy
 
 @dataclass
 class BacktestConfig:
-    """Configuration for a backtest run."""
     features_dir: Path = Path("data/features")
     raw_dir: Path = Path("data/raw")
-
-    # Fees (Binance BTCUSDT defaults)
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 2.0
-
-    # Engine
     latency_ms: int = 10
     aggressive_slippage_bps: float = 1.0
     fill_size_cap: float = 1.0
     initial_cash: float = INITIAL_CAPITAL
-
-    # Risk
     max_position: float = 5.0
     max_order_size: float = 0.5
     max_daily_loss: float = 1000.0
-
     verbose: bool = True
 
 
 @dataclass
 class BacktestResult:
-    """Everything a backtest produces."""
     strategy_name: str
     strategy_params: dict
     dates: list[str]
@@ -56,14 +47,13 @@ class BacktestResult:
     config_hash: str
     data_hash: str
     runtime_sec: float = 0.0
-
     win_rate: float = 0.0
     profit_factor: float = 0.0
     turnover_usd: float = 0.0
     fill_count: int = 0
     avg_holding_sec: float = 0.0
     fills_per_hour: float = 0.0
-    gross_pnl_usd: float = 0.0     # before fees, from engine
+    gross_pnl_usd: float = 0.0
 
 
 def _hash_config(config: BacktestConfig, strategy_name: str,
@@ -84,7 +74,6 @@ def _hash_config(config: BacktestConfig, strategy_name: str,
 
 
 def _hash_fills(fills: pd.DataFrame) -> str:
-    """Stable hash of fills for determinism verification."""
     if len(fills) == 0:
         return "empty"
     stable = fills[["recv_ts_ns", "side", "price", "qty"]].copy()
@@ -96,48 +85,35 @@ def _hash_fills(fills: pd.DataFrame) -> str:
 def _load_data_for_date(
     date: str, config: BacktestConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load features + trades for a single date (YYYYMMDD)."""
     features_path = config.features_dir / f"depth_trades_{date}.parquet"
     trades_path = config.raw_dir / date / f"trades_{date}.jsonl"
-
     if not features_path.exists():
         raise FileNotFoundError(f"Features not found: {features_path}")
     if not trades_path.exists():
         raise FileNotFoundError(f"Trades not found: {trades_path}")
-
     features = pd.read_parquet(features_path)
     trades = load_trades(trades_path)
     return features, trades
 
 
 def _compute_round_trip_pnl(fills: pd.DataFrame, taker_fee_bps: float) -> list[float]:
-    """Reconstruct realized P&L per round trip via weighted-average cost basis.
-
-    Returns a list, one entry per closed portion. Used by both
-    win_rate and profit_factor. Fees are approximated on both legs
-    (open + close) at taker_fee_bps.
-    """
+    """Reconstruct realized P&L per round trip via weighted-average cost basis."""
     if len(fills) == 0:
         return []
-
     df = fills.sort_values("recv_ts_ns").reset_index(drop=True)
     position = 0.0
     avg_entry = 0.0
     round_trips = []
-
     for _, row in df.iterrows():
         signed_qty = row["qty"] if row["side"] == "BUY" else -row["qty"]
-
         if position != 0 and (position > 0) != (signed_qty > 0):
             closing_qty = min(abs(signed_qty), abs(position))
             if position > 0:
                 pnl = (row["price"] - avg_entry) * closing_qty
             else:
                 pnl = (avg_entry - row["price"]) * closing_qty
-            # Approximate round-trip fee: 2 legs × taker_bps
             fee = row["price"] * closing_qty * (taker_fee_bps * 2) / 10_000.0
             round_trips.append(pnl - fee)
-
         new_position = position + signed_qty
         if new_position == 0:
             avg_entry = 0.0
@@ -148,13 +124,10 @@ def _compute_round_trip_pnl(fills: pd.DataFrame, taker_fee_bps: float) -> list[f
                 / total_qty
             )
         position = new_position
-
     return round_trips
 
 
 class Backtest:
-    """Run a strategy over one or more dates."""
-
     def __init__(
         self,
         strategy_name: str,
@@ -164,9 +137,9 @@ class Backtest:
         self.strategy_name = strategy_name
         self.config = config or BacktestConfig()
         self.strategy_params = strategy_params or {}
+        self._last_backtest_duration_hours: float = 0.0
 
     def run(self, dates: list[str]) -> BacktestResult:
-        """Run the strategy over the given dates. Returns aggregated result."""
         import time
         t0 = time.time()
 
@@ -198,7 +171,6 @@ class Backtest:
 
             strategy = get_strategy(self.strategy_name, **self.strategy_params)
             engine = Engine(strategy, config=engine_config, limits=risk_limits)
-
             result = engine.run(features, trades)
             total_gross_pnl += result.trading_pnl
 
@@ -217,6 +189,15 @@ class Backtest:
 
         fills_df = pd.concat(all_fills, ignore_index=True) if all_fills else pd.DataFrame()
         equity_df = pd.concat(all_equity, ignore_index=True) if all_equity else pd.DataFrame()
+
+        # Full backtest duration (across all dates) — used by fills_per_hour
+        if len(equity_df) > 0 and "recv_ts_ns" in equity_df.columns:
+            duration_ns = (
+                equity_df["recv_ts_ns"].max() - equity_df["recv_ts_ns"].min()
+            )
+            self._last_backtest_duration_hours = duration_ns / 1e9 / 3600
+        else:
+            self._last_backtest_duration_hours = 0.0
 
         metrics = self._compute_metrics(equity_df, fills_df)
 
@@ -240,13 +221,6 @@ class Backtest:
         )
 
     def _compute_metrics(self, equity: pd.DataFrame, fills: pd.DataFrame) -> RiskMetrics:
-        """Compute risk metrics from equity + fills.
-
-        `compute_risk_metrics` expects a `fill_pnl_usd` column for
-        per-fill VaR/ES. The engine's fills DataFrame tracks aggregate
-        P&L, not per-fill. We reconstruct per-fill P&L here via
-        weighted-average cost basis.
-        """
         if len(equity) == 0:
             return RiskMetrics(
                 var_95=0, var_99=0, es_95=0, es_99=0,
@@ -255,7 +229,6 @@ class Backtest:
                 duration_hours=0, resample_freq="n/a", var_basis="empty",
                 sharpe_valid=False,
             )
-
         fills_with_pnl = self._attach_fill_pnl(fills)
         return compute_risk_metrics(
             equity,
@@ -263,38 +236,25 @@ class Backtest:
         )
 
     def _attach_fill_pnl(self, fills: pd.DataFrame) -> pd.DataFrame:
-        """Add per-fill `fill_pnl_usd` via weighted-average cost basis.
-
-        Mirrors the engine's realized P&L logic:
-          - Opening / adding: P&L = 0 (unrealized)
-          - Reducing / closing: P&L = (exit - entry) × closed_qty
-            (flipped for shorts)
-          - Fees subtracted from each fill's P&L
-        """
         if len(fills) == 0:
             return fills
-
         df = fills.copy().sort_values("recv_ts_ns").reset_index(drop=True)
         df["fill_pnl_usd"] = 0.0
-
         position = 0.0
         avg_entry = 0.0
         maker_bps = self.config.maker_fee_bps
         taker_bps = self.config.taker_fee_bps
-
         for i, row in df.iterrows():
             signed_qty = row["qty"] if row["side"] == "BUY" else -row["qty"]
             fee_bps = maker_bps if bool(row["is_maker"]) else taker_bps
             fee = row["notional"] * fee_bps / 10_000.0
             realized = 0.0
-
             if position != 0 and (position > 0) != (signed_qty > 0):
                 closing_qty = min(abs(signed_qty), abs(position))
                 if position > 0:
                     realized = (row["price"] - avg_entry) * closing_qty
                 else:
                     realized = (avg_entry - row["price"]) * closing_qty
-
             new_position = position + signed_qty
             if new_position == 0:
                 avg_entry = 0.0
@@ -304,21 +264,17 @@ class Backtest:
                     (abs(position) * avg_entry + abs(signed_qty) * row["price"])
                     / total_qty
                 )
-
             position = new_position
             df.at[i, "fill_pnl_usd"] = realized - fee
-
         return df
 
     def _win_rate(self, fills: pd.DataFrame) -> float:
-        """Round-trip win rate: fraction of closed positions with positive P&L."""
         round_trips = _compute_round_trip_pnl(fills, self.config.taker_fee_bps)
         if not round_trips:
             return 0.0
         return float(sum(1 for p in round_trips if p > 0) / len(round_trips))
 
     def _profit_factor(self, fills: pd.DataFrame) -> float:
-        """Gross profit / gross loss across round trips."""
         round_trips = _compute_round_trip_pnl(fills, self.config.taker_fee_bps)
         if not round_trips:
             return 0.0
@@ -334,7 +290,6 @@ class Backtest:
         return float(fills["notional"].sum())
 
     def _avg_holding_sec(self, fills: pd.DataFrame) -> float:
-        """Average time between opposite-side fills (approximate holding period)."""
         if len(fills) < 2:
             return 0.0
         fills_sorted = fills.sort_values("recv_ts_ns").reset_index(drop=True)
@@ -348,8 +303,15 @@ class Backtest:
         return float(np.mean(gaps)) if gaps else 0.0
 
     def _fills_per_hour(self, fills: pd.DataFrame) -> float:
+        """Rate of fills over the full backtest duration (not just the
+        span between first and last fill — vwap/twap fire all their
+        orders in milliseconds, producing absurd rates if measured on
+        the fill span alone)."""
         if len(fills) < 2:
             return 0.0
+        if self._last_backtest_duration_hours > 0:
+            return len(fills) / self._last_backtest_duration_hours
+        # Fallback: fill-based duration
         duration_ns = fills["recv_ts_ns"].max() - fills["recv_ts_ns"].min()
         if duration_ns <= 0:
             return 0.0
@@ -358,12 +320,11 @@ class Backtest:
 
 
 def summarize_result(result: BacktestResult) -> str:
-    """Human-readable summary for CLI output."""
     m = result.metrics
     sharpe_line = (
         f"Sharpe:   {m.sharpe_hourly:+.3f}"
         if m.sharpe_valid
-        else "Sharpe:   n/a (insufficient buckets)"
+        else "Sharpe:   n/a (insufficient buckets or duration)"
     )
     lines = [
         f"Strategy: {result.strategy_name}",
@@ -394,7 +355,6 @@ def summarize_result(result: BacktestResult) -> str:
 
 
 def compare_results(results: list[BacktestResult]) -> pd.DataFrame:
-    """Return a side-by-side comparison DataFrame."""
     rows = []
     for r in results:
         m = r.metrics

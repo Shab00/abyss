@@ -7,7 +7,9 @@ Conventions:
   - Max drawdown as fraction of peak cumulative P&L
   - Sharpe computed on time-bucketed P&L changes, resampled at a
     frequency appropriate to the window length. Suppressed (valid=False)
-    when fewer than 20 buckets — otherwise the number is noise.
+    when either fewer than 20 buckets OR fewer than 4 hours simulated —
+    short backtests produce Sharpe values in the thousands purely from
+    noise (multiplying a small mean/std ratio by sqrt(525600) explodes).
   - If `fills` is provided, metrics exclude unfunded position MTM
 
 Important: the LP is UNFUNDED. Position limits are absolute BTC, not
@@ -21,7 +23,8 @@ import pandas as pd
 
 INITIAL_CAPITAL = 10_000.0
 HOURS_PER_YEAR = 8760
-MIN_SHARPE_BUCKETS = 20   # below this, Sharpe is statistically meaningless
+MIN_SHARPE_BUCKETS = 20       # below this, std estimate is unstable
+MIN_SHARPE_DURATION_HOURS = 4.0  # below this, annualization is meaningless
 
 
 @dataclass
@@ -46,8 +49,8 @@ def compute_risk_metrics(equity: pd.DataFrame, fills: pd.DataFrame = None) -> Ri
     """Compute risk metrics.
 
     If `fills` is provided:
-      - VaR/ES from per-fill P&L distribution (many observations)
-      - Sharpe from time-bucketed cumulative P&L (suppressed if too few buckets)
+      - VaR/ES from per-fill P&L distribution
+      - Sharpe from time-bucketed cumulative P&L (gated on validity)
       - Drawdown from cumulative trading P&L
     Without `fills`, falls back to total equity (not recommended for
     unfunded LPs).
@@ -119,15 +122,22 @@ def compute_risk_metrics(equity: pd.DataFrame, fills: pd.DataFrame = None) -> Ri
     bucket_series = pd.Series(pnl_values, index=ts).resample(freq).last().dropna()
     bucket_returns = (bucket_series.diff().dropna() / INITIAL_CAPITAL).values
 
-    if len(bucket_returns) >= MIN_SHARPE_BUCKETS and bucket_returns.std() > 0:
+    # Validity gate: enough buckets for stable std AND enough simulated
+    # duration for annualization to be meaningful. A 5-minute backtest
+    # with 5 one-minute buckets produces Sharpe values in the thousands
+    # that are pure noise.
+    sharpe_valid = (
+        len(bucket_returns) >= MIN_SHARPE_BUCKETS
+        and bucket_returns.std() > 0
+        and duration_hours >= MIN_SHARPE_DURATION_HOURS
+    )
+    if sharpe_valid:
         sharpe = float(
             (bucket_returns.mean() / bucket_returns.std())
             * np.sqrt(periods_per_year)
         )
-        sharpe_valid = True
     else:
         sharpe = 0.0
-        sharpe_valid = False
 
     return RiskMetrics(
         var_95=var_95,
