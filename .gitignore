@@ -36,3 +36,6 @@ data/features/
 
 # Partitioned feature dataset (regenerable)
 data/features/dataset/
+
+# Generated backtest reports
+data/backtest_reports/

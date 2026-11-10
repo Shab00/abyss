@@ -54,6 +54,10 @@ class BacktestResult:
     avg_holding_sec: float = 0.0
     fills_per_hour: float = 0.0
     gross_pnl_usd: float = 0.0
+    # Per-day P&L, engine-tracked (correct across day boundaries —
+    # reconstructing from fills incorrectly carries positions across
+    # day boundaries and undercounts unrealized losses).
+    per_day_pnl: dict = field(default_factory=dict)  # {date: {pnl_usd, fills}}
 
 
 def _hash_config(config: BacktestConfig, strategy_name: str,
@@ -147,6 +151,7 @@ class Backtest:
         all_equity = []
         total_gross_pnl = 0.0
         data_hash_parts = []
+        per_day_pnl: dict = {}
 
         for date in dates:
             if self.config.verbose:
@@ -174,6 +179,11 @@ class Backtest:
             result = engine.run(features, trades)
             total_gross_pnl += result.trading_pnl
 
+            per_day_pnl[date] = {
+                "pnl_usd": result.trading_pnl,
+                "fills": result.total_fills,
+            }
+
             if len(result.fills) > 0:
                 result.fills["date"] = date
                 all_fills.append(result.fills)
@@ -190,7 +200,6 @@ class Backtest:
         fills_df = pd.concat(all_fills, ignore_index=True) if all_fills else pd.DataFrame()
         equity_df = pd.concat(all_equity, ignore_index=True) if all_equity else pd.DataFrame()
 
-        # Full backtest duration (across all dates) — used by fills_per_hour
         if len(equity_df) > 0 and "recv_ts_ns" in equity_df.columns:
             duration_ns = (
                 equity_df["recv_ts_ns"].max() - equity_df["recv_ts_ns"].min()
@@ -218,6 +227,7 @@ class Backtest:
             avg_holding_sec=self._avg_holding_sec(fills_df),
             fills_per_hour=self._fills_per_hour(fills_df),
             gross_pnl_usd=total_gross_pnl,
+            per_day_pnl=per_day_pnl,
         )
 
     def _compute_metrics(self, equity: pd.DataFrame, fills: pd.DataFrame) -> RiskMetrics:
@@ -303,15 +313,10 @@ class Backtest:
         return float(np.mean(gaps)) if gaps else 0.0
 
     def _fills_per_hour(self, fills: pd.DataFrame) -> float:
-        """Rate of fills over the full backtest duration (not just the
-        span between first and last fill — vwap/twap fire all their
-        orders in milliseconds, producing absurd rates if measured on
-        the fill span alone)."""
         if len(fills) < 2:
             return 0.0
         if self._last_backtest_duration_hours > 0:
             return len(fills) / self._last_backtest_duration_hours
-        # Fallback: fill-based duration
         duration_ns = fills["recv_ts_ns"].max() - fills["recv_ts_ns"].min()
         if duration_ns <= 0:
             return 0.0

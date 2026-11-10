@@ -120,6 +120,11 @@ class Engine:
         self._halt_until_ts_ns = 0
         self._strategy_error_logged = False
 
+        # Track which days we've already logged a halt for, so we don't
+        # spam the console when a strategy re-triggers the loss limit
+        # every cooldown cycle. Day bucket = ts // 86400e9.
+        self._halt_logged_days: set[int] = set()
+
     def run(
         self,
         depth_df: pd.DataFrame,
@@ -397,8 +402,18 @@ class Engine:
 
     def _halt_trading(self, ts: int) -> None:
         self._trading_halted = True
-        self._halt_until_ts_ns = ts + int(self.limits.cooldown_after_loss_sec * 1e9)
-        print(f"[engine] trading halted at ts={ts} (loss limit)")
+        self._halt_until_ts_ns = ts + int(
+            self.limits.cooldown_after_loss_sec * 1e9
+        )
+
+        # Log once per UTC day (ts // 86400e9). Without this gate, a
+        # strategy that keeps hitting the loss limit spams the console
+        # every cooldown cycle (once per 5 min for 6 days = hundreds of
+        # messages).
+        day = ts // int(86_400 * 1e9)
+        if day not in self._halt_logged_days:
+            self._halt_logged_days.add(day)
+            print(f"[engine] trading halted at ts={ts} (loss limit)")
 
     def _record_equity(self, ts: int) -> None:
         self.equity_records.append({
