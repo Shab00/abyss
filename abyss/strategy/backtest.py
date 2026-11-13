@@ -54,6 +54,7 @@ class BacktestResult:
     avg_holding_sec: float = 0.0
     fills_per_hour: float = 0.0
     gross_pnl_usd: float = 0.0
+    final_position: float = 0.0    # signed BTC at end of final day
     # Per-day P&L, engine-tracked (correct across day boundaries —
     # reconstructing from fills incorrectly carries positions across
     # day boundaries and undercounts unrealized losses).
@@ -152,6 +153,7 @@ class Backtest:
         total_gross_pnl = 0.0
         data_hash_parts = []
         per_day_pnl: dict = {}
+        final_position_at_end = 0.0
 
         for date in dates:
             if self.config.verbose:
@@ -178,6 +180,7 @@ class Backtest:
             engine = Engine(strategy, config=engine_config, limits=risk_limits)
             result = engine.run(features, trades)
             total_gross_pnl += result.trading_pnl
+            final_position_at_end = result.final_position
 
             per_day_pnl[date] = {
                 "pnl_usd": result.trading_pnl,
@@ -227,6 +230,7 @@ class Backtest:
             avg_holding_sec=self._avg_holding_sec(fills_df),
             fills_per_hour=self._fills_per_hour(fills_df),
             gross_pnl_usd=total_gross_pnl,
+            final_position=final_position_at_end,
             per_day_pnl=per_day_pnl,
         )
 

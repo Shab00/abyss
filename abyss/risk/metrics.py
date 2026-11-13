@@ -7,9 +7,11 @@ Conventions:
   - Max drawdown as fraction of peak cumulative P&L
   - Sharpe computed on time-bucketed P&L changes, resampled at a
     frequency appropriate to the window length. Suppressed (valid=False)
-    when either fewer than 20 buckets OR fewer than 4 hours simulated —
-    short backtests produce Sharpe values in the thousands purely from
-    noise (multiplying a small mean/std ratio by sqrt(525600) explodes).
+    when any of:
+      - fewer than 20 buckets (std estimate unstable)
+      - fewer than 4 hours simulated (annualization meaningless)
+      - fewer than 100 underlying observations (Sharpe driven by a
+        handful of fills, not a strategy edge)
   - If `fills` is provided, metrics exclude unfunded position MTM
 
 Important: the LP is UNFUNDED. Position limits are absolute BTC, not
@@ -23,8 +25,10 @@ import pandas as pd
 
 INITIAL_CAPITAL = 10_000.0
 HOURS_PER_YEAR = 8760
-MIN_SHARPE_BUCKETS = 20       # below this, std estimate is unstable
+MIN_SHARPE_BUCKETS = 20          # below this, std estimate is unstable
 MIN_SHARPE_DURATION_HOURS = 4.0  # below this, annualization is meaningless
+MIN_SHARPE_OBSERVATIONS = 100    # below this, Sharpe is driven by a
+                                 # handful of fills, not a strategy edge
 
 
 @dataclass
@@ -122,14 +126,17 @@ def compute_risk_metrics(equity: pd.DataFrame, fills: pd.DataFrame = None) -> Ri
     bucket_series = pd.Series(pnl_values, index=ts).resample(freq).last().dropna()
     bucket_returns = (bucket_series.diff().dropna() / INITIAL_CAPITAL).values
 
-    # Validity gate: enough buckets for stable std AND enough simulated
-    # duration for annualization to be meaningful. A 5-minute backtest
-    # with 5 one-minute buckets produces Sharpe values in the thousands
-    # that are pure noise.
+    # Validity gate: enough buckets for stable std, enough simulated
+    # duration for annualization to be meaningful, AND enough underlying
+    # observations. A strategy with 10 fills spread over 72 hours has
+    # plenty of hourly buckets but a Sharpe driven by those 10 trades —
+    # which is noise, not an edge.
+    n_obs = len(fills) if fills is not None else len(pnl_values)
     sharpe_valid = (
         len(bucket_returns) >= MIN_SHARPE_BUCKETS
         and bucket_returns.std() > 0
         and duration_hours >= MIN_SHARPE_DURATION_HOURS
+        and n_obs >= MIN_SHARPE_OBSERVATIONS
     )
     if sharpe_valid:
         sharpe = float(
